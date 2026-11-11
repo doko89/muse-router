@@ -1,0 +1,8 @@
+# build output
+/muse-router
+*.test
+coverage.out
+
+# local secrets (never commit)
+.env
+credential.json
