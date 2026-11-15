@@ -170,9 +170,8 @@ func TestAuthAndHealth(t *testing.T) {
 }
 
 func TestModelsShape(t *testing.T) {
-	contextLength := 8
 	services := Services{Models: &fakeModels{models: []domain.Model{{
-		ID: "m", Provider: "muse-code", Name: "M", ContextWindow: contextLength,
+		ID: "m", Provider: "muse-code", Name: "M", ContextWindow: 8,
 		InputModalities: []string{"text", "image"}, Known: true,
 	}}}}
 	server := testServer(nil, services)
@@ -186,10 +185,10 @@ func TestModelsShape(t *testing.T) {
 	var listing struct {
 		Object string `json:"object"`
 		Data   []struct {
-			ID              string   `json:"id"`
-			OwnedBy         string   `json:"owned_by"`
-			ContextLength   int      `json:"context_length"`
-			InputModalities []string `json:"input_modalities"`
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
@@ -198,7 +197,7 @@ func TestModelsShape(t *testing.T) {
 	if listing.Object != "list" || len(listing.Data) != 1 || listing.Data[0].ID != "muse-code/m" {
 		t.Fatalf("listing = %+v", listing)
 	}
-	if listing.Data[0].ContextLength != 8 || len(listing.Data[0].InputModalities) != 2 {
+	if listing.Data[0].Object != "model" || listing.Data[0].OwnedBy != "muse-code" || listing.Data[0].Created <= 0 {
 		t.Fatalf("row = %+v", listing.Data[0])
 	}
 }

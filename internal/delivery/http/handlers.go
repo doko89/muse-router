@@ -43,14 +43,10 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type modelRow struct {
-	ID              string   `json:"id"`
-	Object          string   `json:"object"`
-	OwnedBy         string   `json:"owned_by"`
-	API             string   `json:"api"`
-	DisplayName     string   `json:"display_name"`
-	ContextLength   *int     `json:"context_length,omitempty"`
-	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
-	InputModalities []string `json:"input_modalities"`
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -59,31 +55,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models := s.services.Models.List(r.Context())
+	now := time.Now().Unix()
 	rows := make([]modelRow, 0, len(models))
 	for _, model := range models {
-		row := modelRow{
-			ID:              model.QualifiedID(),
-			Object:          "model",
-			OwnedBy:         model.Provider,
-			API:             "openai-responses",
-			DisplayName:     model.Name,
-			InputModalities: model.InputModalities,
-		}
-		if row.DisplayName == "" {
-			row.DisplayName = model.ID
-		}
-		if len(row.InputModalities) == 0 {
-			row.InputModalities = []string{"text"}
-		}
-		if model.ContextWindow > 0 {
-			contextLength := model.ContextWindow
-			row.ContextLength = &contextLength
-		}
-		if model.MaxTokens > 0 {
-			maxTokens := model.MaxTokens
-			row.MaxOutputTokens = &maxTokens
-		}
-		rows = append(rows, row)
+		rows = append(rows, modelRow{
+			ID:      model.QualifiedID(),
+			Object:  "model",
+			Created: now,
+			OwnedBy: model.Provider,
+		})
 	}
 	writeJSON(w, http.StatusOK, modelsPayload{Object: "list", Data: rows})
 }
