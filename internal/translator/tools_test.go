@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -34,8 +35,53 @@ func TestBuildWireMapCollision(t *testing.T) {
 	if wireMap["_bash"] != "bash" || DecodeToolName("_web_search", wireMap) != "web_search" {
 		t.Fatalf("wire map roundtrip broken: %v", wireMap)
 	}
-	if got := DecodeToolName("_unknown", wireMap); got != "_unknown" {
-		t.Fatalf("unknown wire name must pass through, got %q", got)
+	if got := DecodeToolName("_unknown", wireMap); got != "unknown" {
+		t.Fatalf("unknown wire name must fall back to stripped name, got %q", got)
+	}
+	if got := DecodeToolName("plain", wireMap); got != "plain" {
+		t.Fatalf("unprefixed name must pass through, got %q", got)
+	}
+	longUnprefixed := "_" + strings.Repeat("b", 64)
+	if got := DecodeToolName(longUnprefixed, wireMap); got != longUnprefixed {
+		t.Fatalf("over-long wire name cannot be a prefix, got %q", got)
+	}
+}
+
+func TestClassifyToolChoice(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		mode   string
+		detail string
+	}{
+		{"missing", ``, ToolChoiceAuto, ""},
+		{"null", `null`, ToolChoiceAuto, ""},
+		{"auto", `"auto"`, ToolChoiceAuto, ""},
+		{"none", `"none"`, ToolChoiceNone, ""},
+		{"required", `"required"`, ToolChoiceForced, `"required"`},
+		{"chat named", `{"type":"function","function":{"name":"bash"}}`, ToolChoiceForced, `for function "bash"`},
+		{"responses named", `{"type":"function","name":"bash"}`, ToolChoiceForced, `for function "bash"`},
+		{"allowed tools", `{"type":"allowed_tools","mode":"auto"}`, ToolChoiceForced, `of type "allowed_tools"`},
+	}
+	for _, tc := range cases {
+		mode, detail, err := ClassifyToolChoice("chat", json.RawMessage(tc.raw))
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.name, err)
+		}
+		if mode != tc.mode || detail != tc.detail {
+			t.Fatalf("%s: got (%q,%q), want (%q,%q)", tc.name, mode, detail, tc.mode, tc.detail)
+		}
+	}
+	for _, raw := range []string{`"sometimes"`, `{"type":"bogus"}`, `{"function":{}}`, `42`, `[1]`, `true`} {
+		if _, _, err := ClassifyToolChoice("chat", json.RawMessage(raw)); err == nil {
+			t.Fatalf("raw %s must be rejected", raw)
+		} else if !strings.Contains(err.Error(), "tool_choice") {
+			t.Fatalf("raw %s error must mention tool_choice: %v", raw, err)
+		}
+	}
+	if _, _, err := ClassifyToolChoice("responses", json.RawMessage(`"sometimes"`)); err == nil ||
+		!strings.Contains(err.Error(), "responses:") {
+		t.Fatalf("error must carry the caller prefix: %v", err)
 	}
 }
 

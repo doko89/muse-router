@@ -169,6 +169,28 @@ func TestChatErrorPaths(t *testing.T) {
 	}
 }
 
+// rejectCatalog resolves nothing, to exercise the unknown-model path.
+type rejectCatalog struct{}
+
+func (rejectCatalog) List() []domain.Model { return nil }
+
+func (rejectCatalog) Resolve(_ string) (domain.Model, bool) { return domain.Model{}, false }
+
+func TestUnknownModelMessage(t *testing.T) {
+	ctx := context.Background()
+	chat := NewChatService(&fakeMuse{}, &fakeCreds{key: "k"}, rejectCatalog{}, false)
+	req := &domain.ChatRequest{Model: "nope", Messages: []domain.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}}}
+	_, err := chat.Complete(ctx, req)
+	if err == nil || !strings.Contains(err.Error(), `invalid model "nope"`) {
+		t.Fatalf("chat err = %v, want invalid model", err)
+	}
+	responses := NewResponsesService(&fakeMuse{}, &fakeCreds{key: "k"}, rejectCatalog{}, false)
+	_, err = responses.Complete(ctx, []byte(`{"model":"nope","input":"hi"}`))
+	if err == nil || !strings.Contains(err.Error(), `invalid model "nope"`) {
+		t.Fatalf("responses err = %v, want invalid model", err)
+	}
+}
+
 func TestResponsesCompleteRaw(t *testing.T) {
 	ctx := context.Background()
 	complete := `{"id":"r","model":"m","status":"completed","created_at":1.0,
@@ -214,13 +236,14 @@ func TestResponsesGetDecodesWithCache(t *testing.T) {
 	if muse.lastGetID != "resp_1" {
 		t.Fatalf("get id = %q", muse.lastGetID)
 	}
-	// Unknown ids degrade to raw passthrough.
+	// Unknown ids degrade to heuristic fallback: one "_" is stripped even
+	// without the creating request's wire map.
 	raw, err := service.Get(ctx, "resp_other")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !strings.Contains(string(raw), "_bash") {
-		t.Fatalf("uncached id must pass through raw: %s", raw)
+	if strings.Contains(string(raw), "_bash") {
+		t.Fatalf("uncached id leaked wire name: %s", raw)
 	}
 	if _, err := service.Get(ctx, "../x"); err == nil {
 		t.Fatal("separator in id must 404")
@@ -248,8 +271,9 @@ func TestResponsesPassthroughStream(t *testing.T) {
 	if len(frames) != 2 || frames[0].Event != "response.output_item.added" {
 		t.Fatalf("frames = %+v", frames)
 	}
-	if !strings.Contains(string(frames[0].Data), `"name":"_bash"`) {
-		// No tools declared: unknown wire name passes through untouched.
+	if !strings.Contains(string(frames[0].Data), `"name":"bash"`) {
+		// No tools declared: the undeclared wire name still falls back to
+		// its stripped form instead of leaking.
 		t.Fatalf("frame = %s", frames[0].Data)
 	}
 }

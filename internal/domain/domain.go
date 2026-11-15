@@ -30,12 +30,21 @@ func AsRouterError(err error) *RouterError {
 	if re, ok := err.(*RouterError); ok {
 		return re
 	}
-	return &RouterError{Status: 500, Type: "internal_error", Message: "internal error"}
+	return &RouterError{Status: 500, Type: "server_error", Message: "internal error"}
 }
 
 // BadRequest builds a 400 invalid_request_error.
 func BadRequest(format string, args ...any) *RouterError {
 	return &RouterError{Status: 400, Type: "invalid_request_error", Message: fmt.Sprintf(format, args...)}
+}
+
+// InvalidModel builds a 400 for an unresolvable model id. A blank id means
+// the client omitted the field, so it keeps the missing-field message.
+func InvalidModel(id string) *RouterError {
+	if strings.TrimSpace(id) == "" {
+		return BadRequest("Missing top-level `model` field")
+	}
+	return BadRequest("invalid model %q", id)
 }
 
 // Unauthorized builds a 401 authentication_error.
@@ -48,9 +57,9 @@ func Forbidden(message string) *RouterError {
 	return &RouterError{Status: 403, Type: "permission_error", Message: message}
 }
 
-// NotFound builds a 404 invalid_request_error.
+// NotFound builds a 404 not_found_error.
 func NotFound(format string, args ...any) *RouterError {
-	return &RouterError{Status: 404, Type: "invalid_request_error", Message: fmt.Sprintf(format, args...)}
+	return &RouterError{Status: 404, Type: "not_found_error", Message: fmt.Sprintf(format, args...)}
 }
 
 // RateLimited builds a 429 rate_limit_error.
@@ -58,16 +67,16 @@ func RateLimited(message string) *RouterError {
 	return &RouterError{Status: 429, Type: "rate_limit_error", Message: message}
 }
 
-// Internal builds a 500 internal_error.
+// Internal builds a 500 server_error.
 func Internal(format string, args ...any) *RouterError {
-	return &RouterError{Status: 500, Type: "internal_error", Message: fmt.Sprintf(format, args...)}
+	return &RouterError{Status: 500, Type: "server_error", Message: fmt.Sprintf(format, args...)}
 }
 
 // Upstream maps an upstream Muse failure to a router error. Client errors
 // keep their status so callers see 401/403/404/429 as-is; anything else
 // becomes a 502 with the provider excerpt attached.
 func Upstream(status int, message string) *RouterError {
-	kind := "upstream_error"
+	kind := "server_error"
 	switch status {
 	case 400:
 		kind = "invalid_request_error"
@@ -76,7 +85,7 @@ func Upstream(status int, message string) *RouterError {
 	case 403:
 		kind = "permission_error"
 	case 404:
-		kind = "invalid_request_error"
+		kind = "not_found_error"
 	case 429:
 		kind = "rate_limit_error"
 	default:

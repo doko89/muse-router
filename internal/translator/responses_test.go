@@ -16,7 +16,7 @@ func TestSanitizeRaw(t *testing.T) {
 			{"type":"function_call_output","call_id":"c1","output":"ok"}
 		],
 		"tools":[{"type":"function","name":"bash","description":"Run."}],
-		"tool_choice":"required","reasoning":{"effort":"low"},
+		"tool_choice":"auto","reasoning":{"effort":"low"},
 		"truncation":"disabled","parallel_tool_calls":true,"top_logprobs":0,
 		"text":{"verbosity":"low"},"service_tier":"flex"}`
 	payload, wireMap, err := SanitizeRaw([]byte(body), true, nil, false)
@@ -64,6 +64,38 @@ func TestSanitizeRaw(t *testing.T) {
 	for _, field := range []string{"truncation", "parallel_tool_calls", "top_logprobs", "text", "service_tier", "instructions"} {
 		if _, present := raw[field]; !present {
 			t.Fatalf("unowned field %q must survive: %s", field, payload)
+		}
+	}
+}
+
+func TestSanitizeRawToolChoice(t *testing.T) {
+	none := `{"model":"m","input":"hi","tools":[{"type":"function","name":"bash"}],"tool_choice":"none"}`
+	payload, wireMap, err := SanitizeRaw([]byte(none), false, nil, false)
+	if err != nil {
+		t.Fatalf("none: %v", err)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := out["tools"]; present {
+		t.Fatalf("none must drop tools upstream: %s", payload)
+	}
+	if _, present := out["tool_choice"]; present {
+		t.Fatalf("tool_choice must be dropped: %s", payload)
+	}
+	if wireMap["_bash"] != "bash" {
+		t.Fatalf("none must keep the decode map, got %v", wireMap)
+	}
+	for _, raw := range []string{
+		`{"model":"m","input":"hi","tool_choice":"required"}`,
+		`{"model":"m","input":"hi","tool_choice":{"type":"function","name":"bash"}}`,
+		`{"model":"m","input":"hi","tool_choice":"sometimes"}`,
+	} {
+		if _, _, err := SanitizeRaw([]byte(raw), false, nil, false); err == nil {
+			t.Fatalf("body %s must fail", raw)
+		} else if !strings.Contains(err.Error(), "tool_choice") {
+			t.Fatalf("body %s error must mention tool_choice: %v", raw, err)
 		}
 	}
 }
@@ -198,12 +230,16 @@ func TestDecodeAndRewriteResponses(t *testing.T) {
 	if !strings.Contains(string(rewritten), `"name":"bash"`) || !strings.Contains(string(rewritten), `"sequence_number":7`) {
 		t.Fatalf("rewritten = %s", rewritten)
 	}
+	done := []byte(`{"type":"response.function_call_arguments.done","output_index":0,"sequence_number":12,"item_id":"fc_1","arguments":"{\"query\":\"x\"}","name":"_bash"}`)
+	if got := RewriteResponsesFrame(done, wireMap); !strings.Contains(string(got), `"name":"bash"`) || strings.Contains(string(got), "_bash") {
+		t.Fatalf("function_call_arguments.done not decoded: %s", got)
+	}
 	untouched := []byte(`{"type":"response.output_text.delta","delta":"hi"}`)
 	if got := RewriteResponsesFrame(untouched, wireMap); string(got) != string(untouched) {
 		t.Fatalf("delta frame must pass through byte-identical: %s", got)
 	}
-	if got := RewriteResponsesFrame(original, nil); string(got) != string(original) {
-		t.Fatal("empty wire map must pass through")
+	if got := RewriteResponsesFrame(original, nil); !strings.Contains(string(got), `"name":"bash"`) {
+		t.Fatalf("unknown wire name must fall back to stripped: %s", got)
 	}
 	nested := []byte(`{"type":"response.completed","sequence_number":9,"response":{"id":"r","status":"completed",
 		"tools":[{"type":"function","name":"_bash"}],
@@ -218,5 +254,29 @@ func TestDecodeAndRewriteResponses(t *testing.T) {
 	identical := []byte(`{"id":"r","model":"m","status":"completed","output":[]}`)
 	if got, err := DecodeResponsesResponseRaw(identical, nil, "m"); err != nil || string(got) != string(identical) {
 		t.Fatalf("clean payload must pass through byte-identical: %s, %v", got, err)
+	}
+}
+
+func TestDecodeFallbackWithoutWireMap(t *testing.T) {
+	// Uncached GETs (or undeclared upstream calls) have no wire map: a
+	// "_"-prefixed function name still decodes by stripping one prefix.
+	raw := []byte(`{"id":"r","model":"m","status":"completed",
+		"tools":[{"type":"function","name":"_bash"}],
+		"output":[{"type":"function_call","call_id":"c","name":"_bash","arguments":"{}"}]}`)
+	decoded, err := DecodeResponsesResponseRaw(raw, nil, "")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Contains(string(decoded), "_bash") {
+		t.Fatalf("wire name leaked: %s", decoded)
+	}
+	if !strings.Contains(string(decoded), `"name":"bash"`) {
+		t.Fatalf("fallback did not strip: %s", decoded)
+	}
+	// A prose mention of "_x" must not rewrite the payload: no real name
+	// field changes, so the bytes stay identical.
+	prose := []byte(`{"id":"r","model":"m","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"run _bash now"}]}]}`)
+	if got, err := DecodeResponsesResponseRaw(prose, nil, "m"); err != nil || string(got) != string(prose) {
+		t.Fatalf("prose-only payload must pass through byte-identical: %s, %v", got, err)
 	}
 }

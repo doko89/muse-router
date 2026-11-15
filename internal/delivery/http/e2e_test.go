@@ -230,7 +230,7 @@ func TestE2EMessagesAndResponses(t *testing.T) {
 
 	status, raw = e2ePost(t, server.URL+"/v1/responses", `{"model":"muse-code/muse-spark-1.3",
 		"input":[{"role":"user","content":"hi"},{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"}],
-		"tools":[{"type":"function","name":"bash"}],"tool_choice":"required",
+		"tools":[{"type":"function","name":"bash"}],"tool_choice":"auto",
 		"truncation":"disabled","parallel_tool_calls":true,"top_logprobs":0}`)
 	if status != 200 {
 		t.Fatalf("responses status=%d body=%s", status, raw)
@@ -285,8 +285,38 @@ func TestE2EResponsesStreamDecodesNestedNames(t *testing.T) {
 	if strings.Contains(text, "_bash") {
 		t.Fatalf("wire name leaked to stream client: %q", text)
 	}
-	if !strings.Contains(text, `"name":"bash"`) || !strings.HasSuffix(text, "data: [DONE]\n\n") {
+	if !strings.Contains(text, `"name":"bash"`) || strings.Contains(text, "[DONE]") {
 		t.Fatalf("stream body = %q", text)
+	}
+	if !strings.Contains(text, "event: response.completed\n") {
+		t.Fatalf("stream missing terminal event: %q", text)
+	}
+}
+
+func TestE2EToolChoice(t *testing.T) {
+	server, mock := e2eServer(t, nil)
+	defer server.Close()
+
+	// "none" is honored by withholding tools from upstream.
+	status, raw := e2ePost(t, server.URL+"/v1/responses", `{"model":"muse-spark-1.3","input":"hi",
+		"tools":[{"type":"function","name":"bash"}],"tool_choice":"none"}`)
+	if status != 200 {
+		t.Fatalf("none status=%d body=%s", status, raw)
+	}
+	if sent := upstreamPayload(t, mock); len(sent["tools"]) != 0 {
+		t.Fatalf("none must not forward tools: %s", sent["tools"])
+	}
+	// Forced choices are rejected honestly instead of silently becoming auto.
+	status, raw = e2ePost(t, server.URL+"/v1/responses", `{"model":"muse-spark-1.3","input":"hi",
+		"tools":[{"type":"function","name":"bash"}],"tool_choice":"required"}`)
+	if status != 400 || !strings.Contains(string(raw), "tool_choice") {
+		t.Fatalf("required status=%d body=%s", status, raw)
+	}
+	status, raw = e2ePost(t, server.URL+"/v1/chat/completions", `{"model":"muse-spark-1.3",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"function","function":{"name":"bash"}}],"tool_choice":"required"}`)
+	if status != 400 || !strings.Contains(string(raw), "tool_choice") {
+		t.Fatalf("chat required status=%d body=%s", status, raw)
 	}
 }
 

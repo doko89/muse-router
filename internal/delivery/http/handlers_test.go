@@ -302,7 +302,7 @@ func TestResponsesNonStreamPassthrough(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamEndsWithDone(t *testing.T) {
+func TestResponsesStreamHasNoDone(t *testing.T) {
 	services := Services{Responses: &fakeResponses{frames: []usecase.ResponsesStreamFrame{
 		{Event: "response.completed", Data: []byte(`{"type":"response.completed"}`)},
 	}}}
@@ -310,7 +310,9 @@ func TestResponsesStreamEndsWithDone(t *testing.T) {
 	defer server.Close()
 
 	status, body, _ := post(t, server.URL+"/v1/responses", "", `{"model":"m","stream":true,"input":"hi"}`)
-	if status != 200 || !strings.Contains(body, "event: response.completed\n") || !strings.HasSuffix(body, "data: [DONE]\n\n") {
+	// [DONE] is a Chat Completions terminator; Responses ends at the
+	// terminal named event plus stream close.
+	if status != 200 || !strings.Contains(body, "event: response.completed\n") || strings.Contains(body, "[DONE]") {
 		t.Fatalf("status=%d body=%q", status, body)
 	}
 }
@@ -351,7 +353,45 @@ func TestNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 404 {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode: %v (%s)", err, raw)
+	}
+	if envelope.Error.Type != "not_found_error" || envelope.Error.Code != "not_found_error" {
+		t.Fatalf("envelope = %+v, want not_found_error with code", envelope.Error)
+	}
+}
+
+func TestOpenAIErrorEnvelopeTypes(t *testing.T) {
+	services := Services{Chat: &fakeChat{err: domain.Internal("boom")}}
+	server := testServer(nil, services)
+	defer server.Close()
+
+	status, body, _ := post(t, server.URL+"/v1/chat/completions", "", `{"model":"m","messages":[]}`)
+	if status != 500 {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode: %v (%s)", err, body)
+	}
+	if envelope.Error.Type != "server_error" || envelope.Error.Code != "server_error" {
+		t.Fatalf("envelope = %+v, want server_error with code", envelope.Error)
 	}
 }

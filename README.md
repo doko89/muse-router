@@ -5,7 +5,7 @@ kembali sebagai endpoint yang kompatibel dengan OpenAI dan Anthropic.
 
 - `POST /v1/chat/completions` — OpenAI chat (teks, image, tool calls, stream SSE)
 - `POST /v1/responses` — OpenAI Responses (passthrough + quirk-fix)
-- `GET /v1/responses/{id}` — ambil stored run (nama tool di-decode bila run dibuat router ini)
+- `GET /v1/responses/{id}` — ambil stored run (nama tool di-decode persis bila run dibuat router ini, fallback strip `_` bila tidak)
 - `POST /v1/messages` — Anthropic Messages (termasuk tool_use/tool_result, stream)
 - `GET /v1/models` — katalog model (statis + discovery upstream, non-chat difilter)
 - `GET /healthz` — health check tanpa auth
@@ -26,7 +26,7 @@ internal/
                          error bertipe. Tanpa dependensi.
   translator/            chat<->responses, messages<->responses, sanitasi
                          responses. Di sini quirks Muse diterapkan:
-                         prefix tool "_", drop tool_choice, validasi effort.
+                         prefix tool "_", tool_choice, validasi effort.
   usecase/               Satu turn: resolve model -> translate -> upstream ->
                          translate balik. Port MuseClient/CredentialProvider/
                          ModelCatalog didefinisikan di sini.
@@ -42,7 +42,7 @@ internal/
 
 Alur request: `delivery -> usecase -> translator -> muse client -> api.meta.ai`,
 lalu diterjemahkan balik ke format asal. `/v1/responses` adalah passthrough
-(memperbaiki nama tool + menghapus `tool_choice`); dua endpoint lain
+(memperbaiki nama tool + menangani `tool_choice`); dua endpoint lain
 diterjemahkan penuh termasuk tool calls dan stream.
 
 ## Mulai cepat
@@ -113,9 +113,10 @@ ID model boleh telanjang (`muse-spark-1.3`) atau terkualifikasi
   64 karakter (batas upstream) yang dikirim apa adanya; tabrakan dua nama ke
   satu wire name ditolak 400. Nama dikembalikan ke aslinya di respons dan
   stream. Wire name tidak pernah bocor ke klien.
-- **`tool_choice` selalu dibuang** — upstream hanya menerima `auto`.
-  Pengecualian: Anthropic `tool_choice: {"type": "none"}` dipenuhi dengan
-  tidak mengirim tools sama sekali.
+- **`tool_choice`**: `auto` (atau absen) dibuang karena upstream hanya
+  menerima `auto`; `none` dipenuhi dengan tidak mengirim tools sama sekali
+  (berlaku di chat, responses, dan Anthropic `{"type": "none"}`);
+  `required`/spesifik-fungsi ditolak 400 karena upstream tidak mendukungnya.
 - **`store`** default dari `MUSE_STORE_RESPONSES` (default off, demi privasi);
   klien boleh override per request di chat/responses.
 - **Reasoning effort** `minimal/low/medium/high/xhigh/max` divalidasi lalu
@@ -125,7 +126,7 @@ ID model boleh telanjang (`muse-spark-1.3`) atau terkualifikasi
 - **`/v1/responses` meneruskan field tak dikenal** (`background`, `truncation`,
   `text`, `parallel_tool_calls`, ...) apa adanya ke upstream; hanya `model`,
   `input`, `tools`, `reasoning.effort`, `store`, `stream` yang disentuh dan
-  `tool_choice` yang dibuang.
+  `tool_choice` yang ditangani (`auto` dibuang, `none` menghapus `tools`).
 - **`/v1/models` memfilter id non-chat** hasil discovery (`sam-*`,
   `*transcribe*`, `*image*`); famili tak dikenal tetap di-merge optimistis.
 - **Key endpoint rate-limited**: mint hanya sekali per proses lalu di-cache;
@@ -159,8 +160,8 @@ go build ./...
 Test e2e (`internal/delivery/http/e2e_test.go`) menjalankan stack asli
 (server + usecase + translator + Muse client) melawan mock `api.meta.ai`
 dan menegaskan: prefix tool di upstream, decode di respons, framing SSE
-(`[DONE]` untuk chat/responses, `event:` untuk messages), merge `/v1/models`,
-dan 401 tanpa bearer.
+(`[DONE]` hanya untuk chat, `event:` untuk responses/messages),
+merge `/v1/models`, dan 401 tanpa bearer.
 
 ## Keterbatasan (v1)
 
@@ -170,8 +171,8 @@ dan 401 tanpa bearer.
 - Hosted/upstream-only tools (web search dsb.) tidak diterjemahkan ke
   chat/messages; di `/v1/responses` diteruskan apa adanya.
 - `previous_response_id` diteruskan apa adanya (butuh `store: true`).
-- `GET /v1/responses/{id}` hanya mendecode nama tool untuk run yang dibuat
-  oleh instance router ini (cache wiremap 1 jam, maks 10 ribu); id lain
-  dikembalikan mentah apa adanya.
+- `GET /v1/responses/{id}` mendecode nama tool secara persis hanya untuk run
+  yang dibuat oleh instance router ini (cache wiremap 1 jam, maks 10 ribu);
+  id lain memakai fallback heuristic (strip satu `_` terdepan).
 - Mid-stream upstream failure menutup stream (terpotong); kegagalan sebelum
   chunk pertama dikembalikan sebagai error JSON dengan status asli.

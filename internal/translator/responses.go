@@ -3,6 +3,7 @@ package translator
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"strconv"
 	"strings"
 
@@ -28,7 +29,8 @@ func ProbeHead(raw []byte) (model string, stream bool, err error) {
 // every field the router does not own (background, truncation, text, ...).
 // It strips the provider prefix from the model, encodes function tool names
 // (and matching history), clamps reasoning effort onto ladder (nil/empty =
-// unknown model, passthrough), drops tool_choice, applies the store default,
+// unknown model, passthrough), honors tool_choice (none withholds tools,
+// required/specific is a 400, auto is dropped), applies the store default,
 // and sets stream explicitly.
 func SanitizeRaw(raw []byte, storeDefault bool, ladder []string, stream bool) (payload []byte, wireMap map[string]string, err error) {
 	var req map[string]json.RawMessage
@@ -38,6 +40,13 @@ func SanitizeRaw(raw []byte, storeDefault bool, ladder []string, stream bool) (p
 	var model string
 	if err := json.Unmarshal(firstPresent(req, "model"), &model); err != nil || strings.TrimSpace(model) == "" {
 		return nil, nil, domain.BadRequest("Missing top-level `model` field")
+	}
+	choice, detail, err := ClassifyToolChoice("responses", req["tool_choice"])
+	if err != nil {
+		return nil, nil, err
+	}
+	if choice == ToolChoiceForced {
+		return nil, nil, ForcedToolChoiceError("responses", detail)
 	}
 	input, err := sanitizeRawInput(req["input"])
 	if err != nil {
@@ -53,10 +62,14 @@ func SanitizeRaw(raw []byte, storeDefault bool, ladder []string, stream bool) (p
 	} else {
 		delete(req, "tools")
 	}
+	if choice == ToolChoiceNone {
+		delete(req, "tools")
+	}
 	wireMap, err = BuildWireMap(names)
 	if err != nil {
 		return nil, nil, err
 	}
+	log.Printf("router tools in: %v", names)
 	if err := sanitizeRawReasoning(req, ladder); err != nil {
 		return nil, nil, err
 	}
@@ -257,19 +270,28 @@ func DecodeResponsesResponseRaw(data []byte, wireMap map[string]string, requeste
 			needsModel = true
 		}
 	}
-	if !needsModel && !payloadNeedsDecode(data, wireMap) {
+	if !needsModel && !payloadNeedsDecode(data, wireMap) && !payloadMaybeHasFallbackName(data) {
 		return data, nil
 	}
+	changed := false
 	if raw, ok := response["output"]; ok {
-		response["output"] = decodeItemList(raw, wireMap)
+		decoded, itemsChanged := decodeItemList(raw, wireMap)
+		response["output"] = decoded
+		changed = changed || itemsChanged
 	}
 	if raw, ok := response["tools"]; ok {
-		response["tools"] = decodeToolList(raw, wireMap)
+		decoded, toolsChanged := decodeToolList(raw, wireMap)
+		response["tools"] = decoded
+		changed = changed || toolsChanged
 	}
 	if needsModel {
 		if raw, err := json.Marshal(requestedModel); err == nil {
 			response["model"] = raw
+			changed = true
 		}
+	}
+	if !changed {
+		return data, nil
 	}
 	out, err := json.Marshal(response)
 	if err != nil {
@@ -297,27 +319,42 @@ func payloadNeedsDecode(data []byte, wireMap map[string]string) bool {
 	return false
 }
 
-func decodeItemList(raw json.RawMessage, wireMap map[string]string) json.RawMessage {
+// payloadMaybeHasFallbackName reports whether data might carry a wire name
+// unknown to wireMap (uncached GET, undeclared upstream call): any
+// "_"-prefixed string. It over-approximates like payloadNeedsDecode; the
+// structural decode decides whether a real name field changed.
+func payloadMaybeHasFallbackName(data []byte) bool {
+	return bytes.Contains(data, []byte(`"_`))
+}
+
+func decodeItemList(raw json.RawMessage, wireMap map[string]string) (json.RawMessage, bool) {
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return raw
+		return raw, false
 	}
+	changed := false
 	for i, item := range items {
-		items[i] = decodeOutputItem(item, wireMap)
+		decoded, itemChanged := decodeOutputItem(item, wireMap)
+		items[i] = decoded
+		changed = changed || itemChanged
+	}
+	if !changed {
+		return raw, false
 	}
 	rebuilt, err := json.Marshal(items)
 	if err != nil {
-		return raw
+		return raw, false
 	}
-	return rebuilt
+	return rebuilt, true
 }
 
 // decodeToolList maps wire names in a tools echo back to caller names.
-func decodeToolList(raw json.RawMessage, wireMap map[string]string) json.RawMessage {
+func decodeToolList(raw json.RawMessage, wireMap map[string]string) (json.RawMessage, bool) {
 	var tools []json.RawMessage
 	if err := json.Unmarshal(raw, &tools); err != nil {
-		return raw
+		return raw, false
 	}
+	changed := false
 	for i, tool := range tools {
 		var probe struct {
 			Type string `json:"type"`
@@ -341,91 +378,121 @@ func decodeToolList(raw json.RawMessage, wireMap map[string]string) json.RawMess
 				fields["name"] = name
 				if rebuilt, err := json.Marshal(fields); err == nil {
 					tools[i] = rebuilt
+					changed = true
 				}
 			}
 		}
 	}
+	if !changed {
+		return raw, false
+	}
 	rebuilt, err := json.Marshal(tools)
 	if err != nil {
-		return raw
+		return raw, false
 	}
-	return rebuilt
+	return rebuilt, true
 }
 
 // decodeResponseObject rewrites wire tool names inside one raw response
 // object: the tools echo and function_call items in output.
-func decodeResponseObject(raw json.RawMessage, wireMap map[string]string) json.RawMessage {
+func decodeResponseObject(raw json.RawMessage, wireMap map[string]string) (json.RawMessage, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return raw
+		return raw, false
 	}
+	changed := false
 	if tools, ok := obj["tools"]; ok {
-		obj["tools"] = decodeToolList(tools, wireMap)
+		decoded, toolsChanged := decodeToolList(tools, wireMap)
+		obj["tools"] = decoded
+		changed = changed || toolsChanged
 	}
 	if output, ok := obj["output"]; ok {
-		obj["output"] = decodeItemList(output, wireMap)
+		decoded, itemsChanged := decodeItemList(output, wireMap)
+		obj["output"] = decoded
+		changed = changed || itemsChanged
+	}
+	if !changed {
+		return raw, false
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return raw
+		return raw, false
 	}
-	return out
+	return out, true
 }
 
-func decodeOutputItem(item []byte, wireMap map[string]string) []byte {
-	if len(wireMap) == 0 {
-		return item
-	}
+func decodeOutputItem(item []byte, wireMap map[string]string) ([]byte, bool) {
 	var probe struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(item, &probe); err != nil {
-		return item
+		return item, false
 	}
 	if probe.Type != "function_call" || probe.Name == "" {
-		return item
+		return item, false
 	}
 	decoded := DecodeToolName(probe.Name, wireMap)
 	if decoded == probe.Name {
-		return item
+		return item, false
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(item, &fields); err != nil {
-		return item
+		return item, false
 	}
 	name, err := json.Marshal(decoded)
 	if err != nil {
-		return item
+		return item, false
 	}
 	fields["name"] = name
 	rebuilt, err := json.Marshal(fields)
 	if err != nil {
-		return item
+		return item, false
 	}
-	return rebuilt
+	return rebuilt, true
 }
 
 // RewriteResponsesFrame decodes wire tool names inside one upstream SSE data
-// payload: function_call items and nested response objects (which carry the
-// tools echo plus full output on completed events). Payloads mentioning no
-// wire name return byte-identical.
+// payload: function_call items, nested response objects (which carry the
+// tools echo plus full output on completed events), and top-level name
+// fields (response.function_call_arguments.done carries the function name
+// flat, without an item wrapper). Payloads mentioning no wire name return
+// byte-identical.
 func RewriteResponsesFrame(data []byte, wireMap map[string]string) []byte {
-	if len(wireMap) == 0 || len(bytes.TrimSpace(data)) == 0 {
+	if len(bytes.TrimSpace(data)) == 0 {
 		return data
 	}
-	if !payloadNeedsDecode(data, wireMap) {
+	if !payloadNeedsDecode(data, wireMap) && !payloadMaybeHasFallbackName(data) {
 		return data
 	}
 	var event map[string]json.RawMessage
 	if err := json.Unmarshal(data, &event); err != nil {
 		return data
 	}
+	changed := false
 	if item, ok := event["item"]; ok {
-		event["item"] = decodeOutputItem(item, wireMap)
+		decoded, itemChanged := decodeOutputItem(item, wireMap)
+		event["item"] = decoded
+		changed = changed || itemChanged
 	}
 	if response, ok := event["response"]; ok {
-		event["response"] = decodeResponseObject(response, wireMap)
+		decoded, responseChanged := decodeResponseObject(response, wireMap)
+		event["response"] = decoded
+		changed = changed || responseChanged
+	}
+	if rawName, ok := event["name"]; ok {
+		var name string
+		if err := json.Unmarshal(rawName, &name); err == nil {
+			if decoded := DecodeToolName(name, wireMap); decoded != name {
+				if renamed, err := json.Marshal(decoded); err == nil {
+					event["name"] = renamed
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return data
 	}
 	out, err := json.Marshal(event)
 	if err != nil {

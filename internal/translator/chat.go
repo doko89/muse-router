@@ -37,14 +37,22 @@ func withDefaultParameters(raw json.RawMessage) json.RawMessage {
 }
 
 // ChatToResponses converts a chat request into an upstream Responses request.
-// tool_choice is always dropped: api.meta.ai accepts only "auto". Effort is
-// clamped onto ladder (nil/empty = unknown model, passthrough).
+// tool_choice auto (or absent) is dropped since api.meta.ai accepts only
+// "auto"; none withholds tools from upstream; required/specific is a 400.
+// Effort is clamped onto ladder (nil/empty = unknown model, passthrough).
 func ChatToResponses(req *domain.ChatRequest, storeDefault bool, ladder []string) (*domain.ResponsesRequest, map[string]string, error) {
 	if req.Model == "" {
 		return nil, nil, domain.BadRequest("Missing top-level `model` field")
 	}
 	if len(req.Messages) == 0 {
 		return nil, nil, domain.BadRequest("chat: `messages` must not be empty")
+	}
+	choice, detail, err := ClassifyToolChoice("chat", req.ToolChoice)
+	if err != nil {
+		return nil, nil, err
+	}
+	if choice == ToolChoiceForced {
+		return nil, nil, ForcedToolChoiceError("chat", detail)
 	}
 	names := make([]string, 0, len(req.Tools))
 	for _, tool := range req.Tools {
@@ -61,16 +69,19 @@ func ChatToResponses(req *domain.ChatRequest, storeDefault bool, ladder []string
 		return nil, nil, err
 	}
 	var tools []domain.ResponsesTool
-	for _, tool := range req.Tools {
-		if err := checkParametersObject(tool.Function.Parameters, tool.Function.Name); err != nil {
-			return nil, nil, err
+	if choice != ToolChoiceNone {
+		for _, tool := range req.Tools {
+			if err := checkParametersObject(tool.Function.Parameters, tool.Function.Name); err != nil {
+				return nil, nil, err
+			}
+			tools = append(tools, domain.ResponsesTool{
+				Type:        "function",
+				Name:        EncodeToolName(tool.Function.Name),
+				Description: tool.Function.Description,
+				Parameters:  withDefaultParameters(tool.Function.Parameters),
+				Strict:      tool.Function.Strict,
+			})
 		}
-		tools = append(tools, domain.ResponsesTool{
-			Type:        "function",
-			Name:        EncodeToolName(tool.Function.Name),
-			Description: tool.Function.Description,
-			Parameters:  withDefaultParameters(tool.Function.Parameters),
-		})
 	}
 
 	var instructions []string
@@ -196,7 +207,7 @@ func assistantItems(message *domain.ChatMessage) ([]domain.ResponsesInputItem, e
 	}
 	for _, call := range message.ToolCalls {
 		if call.Type != "" && call.Type != "function" {
-			continue
+			return nil, domain.BadRequest("chat: unsupported tool call type %q (only \"function\")", call.Type)
 		}
 		if call.Function.Name == "" {
 			return nil, domain.BadRequest("chat: assistant tool call is missing function.name")

@@ -3,6 +3,9 @@
 package translator
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"muse-router/internal/domain"
@@ -40,12 +43,80 @@ func BuildWireMap(names []string) (map[string]string, error) {
 	return out, nil
 }
 
-// DecodeToolName maps a wire name back to the caller name.
+// DecodeToolName maps a wire name back to the caller name. Names missing
+// from the map (uncached GETs, undeclared upstream calls) fall back to
+// stripping one prefix: Encode only prefixes names that stay within the
+// limit, so longer names pass through untouched.
 func DecodeToolName(wire string, wireMap map[string]string) string {
 	if orig, ok := wireMap[wire]; ok {
 		return orig
 	}
+	if len(wire) > 1 && len(wire) <= ToolNameMaxLength && strings.HasPrefix(wire, ToolNamePrefix) {
+		return wire[len(ToolNamePrefix):]
+	}
 	return wire
+}
+
+// Tool choice modes shared by the chat and responses paths. Upstream accepts
+// only auto: none is honored by withholding tools, forced (required or a
+// specific function) is rejected with a 400 instead of silently becoming
+// auto.
+const (
+	ToolChoiceAuto   = "auto"
+	ToolChoiceNone   = "none"
+	ToolChoiceForced = "forced"
+)
+
+// ClassifyToolChoice maps a raw tool_choice value to its mode. Missing or
+// null means auto. detail describes a forced choice for the error message
+// (`"required"`, `for function "x"`, `of type "y"`). where prefixes errors
+// ("chat" or "responses").
+func ClassifyToolChoice(where string, raw json.RawMessage) (mode, detail string, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ToolChoiceAuto, "", nil
+	}
+	var asString string
+	if json.Unmarshal(trimmed, &asString) == nil {
+		switch asString {
+		case ToolChoiceAuto:
+			return ToolChoiceAuto, "", nil
+		case ToolChoiceNone:
+			return ToolChoiceNone, "", nil
+		case "required":
+			return ToolChoiceForced, `"required"`, nil
+		default:
+			return "", "", domain.BadRequest("%s: invalid tool_choice %q (use \"auto\" or \"none\")", where, asString)
+		}
+	}
+	var asObject struct {
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(trimmed, &asObject) != nil || asObject.Type == "" {
+		return "", "", domain.BadRequest("%s: invalid tool_choice (use \"auto\" or \"none\")", where)
+	}
+	switch asObject.Type {
+	case "function":
+		name := asObject.Function.Name
+		if name == "" {
+			name = asObject.Name
+		}
+		return ToolChoiceForced, fmt.Sprintf("for function %q", name), nil
+	case "allowed_tools":
+		return ToolChoiceForced, `of type "allowed_tools"`, nil
+	default:
+		return "", "", domain.BadRequest("%s: invalid tool_choice type %q (use \"auto\" or \"none\")", where, asObject.Type)
+	}
+}
+
+// ForcedToolChoiceError rejects a required/specific tool_choice the upstream
+// cannot honor. detail comes from ClassifyToolChoice.
+func ForcedToolChoiceError(where, detail string) error {
+	return domain.BadRequest("%s: tool_choice %s is not supported by upstream (only \"auto\" and \"none\")", where, detail)
 }
 
 // ValidEfforts are the reasoning effort tiers Muse serves.

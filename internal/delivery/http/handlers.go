@@ -182,7 +182,9 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, raw []b
 		}
 		return
 	}
-	_ = stream.data([]byte("[DONE]"))
+	// No [DONE] terminator: Responses ends at the terminal named event
+	// (response.completed/incomplete) plus stream close. [DONE] belongs to
+	// Chat Completions only.
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +284,7 @@ type openAIErrorPayload struct {
 type openAIErrorBody struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
 }
 
 type anthropicErrorPayload struct {
@@ -297,15 +300,15 @@ type anthropicErrorBody struct {
 func writeOpenAIError(w http.ResponseWriter, err error) {
 	route := domain.AsRouterError(err)
 	writeJSON(w, route.Status, openAIErrorPayload{
-		Error: openAIErrorBody{Message: route.Message, Type: route.Type},
+		Error: openAIErrorBody{Message: route.Message, Type: route.Type, Code: route.Type},
 	})
 }
 
 func writeAnthropicError(w http.ResponseWriter, err error) {
 	route := domain.AsRouterError(err)
 	anthropicType := route.Type
-	if anthropicType == "invalid_request_error" || anthropicType == "upstream_error" {
-		anthropicType = "invalid_request_error"
+	if anthropicType == "server_error" {
+		anthropicType = "api_error"
 	}
 	writeJSON(w, route.Status, anthropicErrorPayload{
 		Type:  "error",

@@ -8,7 +8,7 @@ import (
 // ResponseMapCache remembers wire maps by upstream response ID so
 // GET /v1/responses/{id} can decode tool names exactly. Entries expire after
 // ttl; the table is bounded (random eviction past max) so a busy router
-// cannot grow it without limit. A miss degrades to raw passthrough.
+// cannot grow it without limit. A miss degrades to prefix-strip fallback.
 type ResponseMapCache struct {
 	mu      sync.Mutex
 	entries map[string]cacheEntry

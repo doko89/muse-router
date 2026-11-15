@@ -88,7 +88,7 @@ func NewChatService(muse MuseClient, creds CredentialProvider, catalog ModelCata
 func (s *ChatService) Complete(ctx context.Context, req *domain.ChatRequest) (*domain.ChatResponse, error) {
 	model, ok := s.catalog.Resolve(req.Model)
 	if !ok {
-		return nil, domain.BadRequest("Missing top-level `model` field")
+		return nil, domain.InvalidModel(req.Model)
 	}
 	upstreamReq, wireMap, err := translator.ChatToResponses(req, s.storeDefault, model.Efforts)
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *ChatService) Complete(ctx context.Context, req *domain.ChatRequest) (*d
 func (s *ChatService) Stream(ctx context.Context, req *domain.ChatRequest, yield func(domain.ChatChunk) error) error {
 	model, ok := s.catalog.Resolve(req.Model)
 	if !ok {
-		return domain.BadRequest("Missing top-level `model` field")
+		return domain.InvalidModel(req.Model)
 	}
 	upstreamReq, wireMap, err := translator.ChatToResponses(req, s.storeDefault, model.Efforts)
 	if err != nil {
@@ -204,7 +204,7 @@ func (s *ResponsesService) Complete(ctx context.Context, rawBody []byte) ([]byte
 	}
 	model, ok := s.catalog.Resolve(modelID)
 	if !ok {
-		return nil, domain.BadRequest("Missing top-level `model` field")
+		return nil, domain.InvalidModel(modelID)
 	}
 	payload, wireMap, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, false)
 	if err != nil {
@@ -262,7 +262,7 @@ func (s *ResponsesService) Stream(ctx context.Context, rawBody []byte, yield fun
 	}
 	model, ok := s.catalog.Resolve(modelID)
 	if !ok {
-		return domain.BadRequest("Missing top-level `model` field")
+		return domain.InvalidModel(modelID)
 	}
 	payload, wireMap, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, true)
 	if err != nil {
@@ -320,7 +320,7 @@ func (s *ResponsesService) Stream(ctx context.Context, rawBody []byte, yield fun
 
 // Get fetches one stored run by id, decoding tool names with the wire map
 // registered when this router created it. Ids created elsewhere (or expired
-// from the cache) return the upstream payload unchanged.
+// from the cache) fall back to stripping one "_" prefix per name.
 func (s *ResponsesService) Get(ctx context.Context, id string) ([]byte, error) {
 	if id == "" || strings.ContainsAny(id, "/?#") {
 		return nil, domain.NotFound("No such response: %s", id)
@@ -369,7 +369,7 @@ func NewMessagesService(muse MuseClient, creds CredentialProvider, catalog Model
 func (s *MessagesService) Complete(ctx context.Context, req *domain.MessagesRequest) (*domain.MessagesResponse, error) {
 	model, ok := s.catalog.Resolve(req.Model)
 	if !ok {
-		return nil, domain.BadRequest("Missing top-level `model` field")
+		return nil, domain.InvalidModel(req.Model)
 	}
 	upstreamReq, wireMap, err := translator.MessagesToResponses(req, s.storeDefault)
 	if err != nil {
@@ -399,7 +399,7 @@ func (s *MessagesService) Complete(ctx context.Context, req *domain.MessagesRequ
 func (s *MessagesService) Stream(ctx context.Context, req *domain.MessagesRequest, yield func(domain.MessagesStreamEvent) error) error {
 	model, ok := s.catalog.Resolve(req.Model)
 	if !ok {
-		return domain.BadRequest("Missing top-level `model` field")
+		return domain.InvalidModel(req.Model)
 	}
 	upstreamReq, wireMap, err := translator.MessagesToResponses(req, s.storeDefault)
 	if err != nil {

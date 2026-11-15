@@ -145,6 +145,11 @@ func TestChatToResponsesImagesAndErrors(t *testing.T) {
 				ID: "c1", Function: domain.ChatToolCallFunction{Name: "bash", Arguments: "nope"},
 			}}}}
 		}, "arguments"},
+		{"non-function tool call", func(r *domain.ChatRequest) {
+			r.Messages = []domain.ChatMessage{{Role: "assistant", ToolCalls: []domain.ChatToolCall{{
+				ID: "c1", Type: "custom", Function: domain.ChatToolCallFunction{Name: "bash", Arguments: "{}"},
+			}}}}
+		}, "tool call type"},
 	}
 	for _, tc := range cases {
 		req := chatRequest(`[{"role":"user","content":"hi"}]`)
@@ -152,6 +157,60 @@ func TestChatToResponsesImagesAndErrors(t *testing.T) {
 		if _, _, err := ChatToResponses(req, false, nil); err == nil || !strings.Contains(err.Error(), tc.contains) {
 			t.Fatalf("%s: err = %v, want containing %q", tc.name, err, tc.contains)
 		}
+	}
+}
+
+func TestChatToolChoice(t *testing.T) {
+	tools := []domain.ChatTool{{Type: "function", Function: domain.ChatFunction{Name: "bash"}}}
+
+	none := chatRequest(`[{"role":"user","content":"hi"}]`, tools...)
+	none.ToolChoice = json.RawMessage(`"none"`)
+	out, wireMap, err := ChatToResponses(none, false, nil)
+	if err != nil {
+		t.Fatalf("none: %v", err)
+	}
+	if len(out.Tools) != 0 {
+		t.Fatalf("none must drop tools upstream, got %+v", out.Tools)
+	}
+	if wireMap["_bash"] != "bash" {
+		t.Fatalf("none must keep the decode map, got %v", wireMap)
+	}
+
+	auto := chatRequest(`[{"role":"user","content":"hi"}]`, tools...)
+	auto.ToolChoice = json.RawMessage(`"auto"`)
+	out, _, err = ChatToResponses(auto, false, nil)
+	if err != nil {
+		t.Fatalf("auto: %v", err)
+	}
+	if len(out.Tools) != 1 || out.Tools[0].Name != "_bash" {
+		t.Fatalf("auto must forward tools, got %+v", out.Tools)
+	}
+
+	for _, raw := range []string{
+		`"required"`,
+		`{"type":"function","function":{"name":"bash"}}`,
+		`"sometimes"`,
+	} {
+		req := chatRequest(`[{"role":"user","content":"hi"}]`, tools...)
+		req.ToolChoice = json.RawMessage(raw)
+		if _, _, err := ChatToResponses(req, false, nil); err == nil {
+			t.Fatalf("tool_choice %s must fail", raw)
+		} else if !strings.Contains(err.Error(), "tool_choice") {
+			t.Fatalf("tool_choice %s error must mention tool_choice: %v", raw, err)
+		}
+	}
+}
+
+func TestChatStrictPassthrough(t *testing.T) {
+	strict := true
+	req := chatRequest(`[{"role":"user","content":"hi"}]`,
+		domain.ChatTool{Type: "function", Function: domain.ChatFunction{Name: "bash", Strict: &strict}})
+	out, _, err := ChatToResponses(req, false, nil)
+	if err != nil {
+		t.Fatalf("ChatToResponses: %v", err)
+	}
+	if len(out.Tools) != 1 || out.Tools[0].Strict == nil || !*out.Tools[0].Strict {
+		t.Fatalf("strict must survive, got %+v", out.Tools)
 	}
 }
 

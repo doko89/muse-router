@@ -122,6 +122,49 @@ func TestUpstreamShapedResponseParses(t *testing.T) {
 	}
 }
 
+func TestErrorTypesFollowOpenAI(t *testing.T) {
+	if route := NotFound("nope"); route.Status != 404 || route.Type != "not_found_error" {
+		t.Fatalf("not found = %+v", route)
+	}
+	if route := Internal("boom"); route.Status != 500 || route.Type != "server_error" {
+		t.Fatalf("internal = %+v", route)
+	}
+	if route := AsRouterError(nil); route != nil {
+		t.Fatalf("nil must stay nil: %+v", route)
+	}
+	if route := AsRouterError(BadRequest("x")); route.Type != "invalid_request_error" {
+		t.Fatalf("typed error must survive: %+v", route)
+	}
+	cases := []struct {
+		status     int
+		wantStatus int
+		wantType   string
+	}{
+		{400, 400, "invalid_request_error"},
+		{404, 404, "not_found_error"},
+		{429, 429, "rate_limit_error"},
+		{500, 502, "server_error"},
+		{502, 502, "server_error"},
+	}
+	for _, tc := range cases {
+		route := Upstream(tc.status, "muse: x")
+		if route.Status != tc.wantStatus || route.Type != tc.wantType {
+			t.Fatalf("upstream %d = %+v", tc.status, route)
+		}
+	}
+}
+
+func TestInvalidModel(t *testing.T) {
+	route := InvalidModel("nope")
+	if route.Status != 400 || !strings.Contains(route.Message, `invalid model "nope"`) {
+		t.Fatalf("route = %+v", route)
+	}
+	route = InvalidModel("  ")
+	if route.Status != 400 || !strings.Contains(route.Message, "Missing top-level `model` field") {
+		t.Fatalf("blank id must report the missing field: %+v", route)
+	}
+}
+
 func TestUpstreamErrorBody(t *testing.T) {
 	route := UpstreamErrorBody(400, []byte(`{"error":{"message":"bad name","type":"x"}}`))
 	if route.Status != 400 || !strings.Contains(route.Message, "bad name") {
