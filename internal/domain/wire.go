@@ -299,6 +299,7 @@ type ResponsesInputItem struct {
 	Content   json.RawMessage `json:"content,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
+	Namespace string          `json:"namespace,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
 	ID        string          `json:"id,omitempty"`

@@ -3,6 +3,8 @@ package usecase
 import (
 	"sync"
 	"time"
+
+	"muse-router/internal/translator"
 )
 
 // ResponseMapCache remembers wire maps by upstream response ID so
@@ -18,6 +20,7 @@ type ResponseMapCache struct {
 
 type cacheEntry struct {
 	wireMap map[string]string
+	nsTools map[string]translator.NamespacedTool
 	expires time.Time
 }
 
@@ -29,10 +32,10 @@ func NewResponseMapCache(ttl time.Duration, max int) *ResponseMapCache {
 	return &ResponseMapCache{entries: make(map[string]cacheEntry), ttl: ttl, max: max}
 }
 
-// Store remembers wireMap under id. Empty ids and tool-less maps are skipped:
-// without tools there is nothing to decode.
-func (c *ResponseMapCache) Store(id string, wireMap map[string]string) {
-	if id == "" || len(wireMap) == 0 {
+// Store remembers wireMap and nsTools under id. Empty ids and tool-less
+// maps are skipped: without tools there is nothing to decode.
+func (c *ResponseMapCache) Store(id string, wireMap map[string]string, nsTools map[string]translator.NamespacedTool) {
+	if id == "" || (len(wireMap) == 0 && len(nsTools) == 0) {
 		return
 	}
 	c.mu.Lock()
@@ -46,19 +49,20 @@ func (c *ResponseMapCache) Store(id string, wireMap map[string]string) {
 			break
 		}
 	}
-	c.entries[id] = cacheEntry{wireMap: wireMap, expires: time.Now().Add(c.ttl)}
+	c.entries[id] = cacheEntry{wireMap: wireMap, nsTools: nsTools, expires: time.Now().Add(c.ttl)}
 }
 
-// Get returns the wire map for id, or false when unknown or expired.
-func (c *ResponseMapCache) Get(id string) (map[string]string, bool) {
+// Get returns the wire map and namespace table for id, or false when
+// unknown or expired.
+func (c *ResponseMapCache) Get(id string) (map[string]string, map[string]translator.NamespacedTool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[id]
 	if !ok || time.Now().After(entry.expires) {
 		delete(c.entries, id)
-		return nil, false
+		return nil, nil, false
 	}
-	return entry.wireMap, true
+	return entry.wireMap, entry.nsTools, true
 }
 
 // Len returns the entry count, for tests.

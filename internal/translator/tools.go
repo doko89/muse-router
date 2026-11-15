@@ -51,10 +51,39 @@ func DecodeToolName(wire string, wireMap map[string]string) string {
 	if orig, ok := wireMap[wire]; ok {
 		return orig
 	}
+	if resolved, ok := resolveDotAlias(wire, wireMap); ok {
+		return resolved
+	}
 	if len(wire) > 1 && len(wire) <= ToolNameMaxLength && strings.HasPrefix(wire, ToolNamePrefix) {
 		return wire[len(ToolNamePrefix):]
 	}
 	return wire
+}
+
+// resolveDotAlias maps a model-emitted dotted spelling (e.g.
+// `mcp__nex_search.search_web`) back to the declared caller name
+// (`mcp__nex_search__search_web`). Models sometimes normalize the MCP
+// namespace separator to a dot; without the alias the unknown name passes
+// through and the client tool router rejects the call. Candidates that
+// exactly match a declared name are returned unchanged, so legitimate
+// dotted tool names are never remapped.
+func resolveDotAlias(candidate string, wireMap map[string]string) (string, bool) {
+	if !strings.Contains(candidate, ".") || len(wireMap) == 0 {
+		return "", false
+	}
+	stripped := candidate
+	if len(candidate) > 1 && strings.HasPrefix(candidate, ToolNamePrefix) {
+		stripped = candidate[len(ToolNamePrefix):]
+	}
+	for _, orig := range wireMap {
+		if candidate == orig || stripped == orig {
+			return orig, true
+		}
+	}
+	if orig, ok := wireMap[EncodeToolName(strings.ReplaceAll(stripped, ".", "__"))]; ok {
+		return orig, true
+	}
+	return "", false
 }
 
 // Tool choice modes shared by the chat and responses paths. Upstream accepts
@@ -193,4 +222,29 @@ func StripProviderPrefix(id string) string {
 		return id[i+1:]
 	}
 	return id
+}
+
+// NamespacedTool records where one expanded flat function came from: the
+// verbatim namespace wrapper name plus the bare child tool name.
+type NamespacedTool struct {
+	Namespace string
+	Bare      string
+}
+
+// JoinNamespaceName flattens a namespace wrapper name and a bare child tool
+// name into the canonical flat function name, following Codex's own rule:
+// trailing underscores are trimmed from the namespace, leading underscores
+// from the child, and the parts are joined with a double underscore. The
+// trimming keeps both Codex generations working: `mcp__nex_search` (bare)
+// and `mcp__nex_search__` (trailing delimiter) flatten identically.
+func JoinNamespaceName(namespace, name string) string {
+	ns := strings.TrimRight(namespace, "_")
+	bare := strings.TrimLeft(name, "_")
+	if ns == "" {
+		return bare
+	}
+	if bare == "" {
+		return ns
+	}
+	return ns + "__" + bare
 }

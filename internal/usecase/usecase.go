@@ -206,7 +206,7 @@ func (s *ResponsesService) Complete(ctx context.Context, rawBody []byte) ([]byte
 	if !ok {
 		return nil, domain.InvalidModel(modelID)
 	}
-	payload, wireMap, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, false)
+	payload, wireMap, nsTools, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, false)
 	if err != nil {
 		return nil, err
 	}
@@ -239,8 +239,8 @@ func (s *ResponsesService) Complete(ctx context.Context, rawBody []byte) ([]byte
 		}
 		return nil, domain.Upstream(502, "muse: "+message)
 	}
-	s.cache.Store(responseIDOf(raw), wireMap)
-	return translator.DecodeResponsesResponseRaw(raw, wireMap, modelID)
+	s.cache.Store(responseIDOf(raw), wireMap, nsTools)
+	return translator.DecodeResponsesResponseRaw(raw, wireMap, nsTools, modelID)
 }
 
 // responseIDOf extracts the top-level response id for cache registration.
@@ -264,7 +264,7 @@ func (s *ResponsesService) Stream(ctx context.Context, rawBody []byte, yield fun
 	if !ok {
 		return domain.InvalidModel(modelID)
 	}
-	payload, wireMap, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, true)
+	payload, wireMap, nsTools, err := translator.SanitizeRaw(rawBody, s.storeDefault, model.Efforts, true)
 	if err != nil {
 		return err
 	}
@@ -286,13 +286,13 @@ func (s *ResponsesService) Stream(ctx context.Context, rawBody []byte, yield fun
 		if err != nil {
 			return err
 		}
-		data := translator.RewriteResponsesFrame(frame.Data, wireMap)
+		data := translator.RewriteResponsesFrame(frame.Data, wireMap, nsTools)
 		name := frame.Event
 		if name == "" {
 			name = event.Type
 		}
 		if event.Response != nil && event.Response.ID != "" {
-			s.cache.Store(event.Response.ID, wireMap)
+			s.cache.Store(event.Response.ID, wireMap, nsTools)
 		}
 		if err := yield(ResponsesStreamFrame{Event: name, Data: data}); err != nil {
 			return err
@@ -344,8 +344,8 @@ func (s *ResponsesService) Get(ctx context.Context, id string) ([]byte, error) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, domain.Upstream(502, "muse: invalid JSON response")
 	}
-	wireMap, _ := s.cache.Get(id)
-	return translator.DecodeResponsesResponseRaw(raw, wireMap, "")
+	wireMap, nsTools, _ := s.cache.Get(id)
+	return translator.DecodeResponsesResponseRaw(raw, wireMap, nsTools, "")
 }
 
 // ---------------------------------------------------------------------------

@@ -134,3 +134,57 @@ func TestStripProviderPrefix(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestDecodeDotAlias(t *testing.T) {
+	wireMap, err := BuildWireMap([]string{"mcp__nex_search__search_web"})
+	if err != nil {
+		t.Fatalf("BuildWireMap: %v", err)
+	}
+	// Models sometimes emit the MCP namespace separator as a dot instead
+	// of the declared double underscore; every spelling must resolve to
+	// the registered tool or the client router rejects the call.
+	for _, candidate := range []string{
+		"_mcp__nex_search__search_web",
+		"mcp__nex_search__search_web",
+		"mcp__nex_search.search_web",
+		"_mcp__nex_search.search_web",
+		"mcp.nex_search.search_web",
+	} {
+		if got := DecodeToolName(candidate, wireMap); got != "mcp__nex_search__search_web" {
+			t.Fatalf("DecodeToolName(%q) = %q, want registered name", candidate, got)
+		}
+	}
+	// A dotted name that IS the declared tool is never remapped.
+	dotted, err := BuildWireMap([]string{"my.tool"})
+	if err != nil {
+		t.Fatalf("BuildWireMap: %v", err)
+	}
+	if got := DecodeToolName("my.tool", dotted); got != "my.tool" {
+		t.Fatalf("declared dotted name remapped to %q", got)
+	}
+	// Unknown dotted names keep the old passthrough behavior.
+	if got := DecodeToolName("other.thing", wireMap); got != "other.thing" {
+		t.Fatalf("unknown dotted name changed to %q", got)
+	}
+	if got := DecodeToolName("_other.thing", wireMap); got != "other.thing" {
+		t.Fatalf("unknown prefixed dotted name = %q, want stripped", got)
+	}
+	if got := DecodeToolName("a.b", nil); got != "a.b" {
+		t.Fatalf("nil map must pass through, got %q", got)
+	}
+}
+
+func TestJoinNamespaceName(t *testing.T) {
+	cases := []struct{ ns, bare, want string }{
+		{"mcp__nex_search", "search_web", "mcp__nex_search__search_web"},
+		{"mcp__nex_search__", "search_web", "mcp__nex_search__search_web"},
+		{"mcp__nex_search", "_search_web", "mcp__nex_search__search_web"},
+		{"multi_agent_v1", "spawn_agent", "multi_agent_v1__spawn_agent"},
+		{"ns", "tool", "ns__tool"},
+	}
+	for _, tc := range cases {
+		if got := JoinNamespaceName(tc.ns, tc.bare); got != tc.want {
+			t.Fatalf("JoinNamespaceName(%q,%q) = %q, want %q", tc.ns, tc.bare, got, tc.want)
+		}
+	}
+}

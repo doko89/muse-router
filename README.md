@@ -115,6 +115,17 @@ ID model boleh telanjang (`muse-spark-1.3`) atau terkualifikasi
   64 karakter (batas upstream) yang dikirim apa adanya; tabrakan dua nama ke
   satu wire name ditolak 400. Nama dikembalikan ke aslinya di respons dan
   stream. Wire name tidak pernah bocor ke klien.
+- **Ejaan dot MCP dinormalisasi**: model kadang meng-emit separator namespace
+  sebagai titik (`mcp__nex_search.search_web`) padahal yang terdaftar bentuk
+  flat (`mcp__nex_search__search_web`); ejaan itu dipetakan kembali ke nama
+  terdaftar di respons dan stream agar router tool klien tidak menolaknya.
+  Nama bertitik yang memang dideklarasikan tidak pernah di-remap.
+- **Namespace tools di-expand**: Codex mengirim MCP sebagai wrapper
+  `{"type":"namespace","name":ns,"tools":[...]}`; router meng-expand tiap
+  child menjadi fungsi flat (`ns__tool`, aturan trim Codex) ke upstream,
+  lalu merekonstruksi panggilan menjadi identitas namespaced
+  (`{"name":bare,"namespace":ns}`) di respons dan stream. History
+  `function_call` dengan namespace digabung kembali ke bentuk flat.
 - **`tool_choice`**: `auto` (atau absen) dibuang karena upstream hanya
   menerima `auto`; `none` dipenuhi dengan tidak mengirim tools sama sekali
   (berlaku di chat, responses, dan Anthropic `{"type": "none"}`);

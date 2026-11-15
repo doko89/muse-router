@@ -23,6 +23,10 @@ type mockUpstream struct {
 	mu         sync.Mutex
 	lastBody   []byte
 	lastStream bool
+	// completeOverride/streamOverride replace the canned fixtures for one
+	// test that needs a different upstream run.
+	completeOverride string
+	streamOverride   string
 }
 
 const mockCompletedRun = `{"id":"resp_1","object":"response","created_at":1794373201.0,"model":"muse-spark-1.3","status":"completed",
@@ -62,10 +66,10 @@ func (m *mockUpstream) handler(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 		if probe.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			w.Write([]byte(mockStreamedRun))
+			w.Write([]byte(m.streamBody()))
 			return
 		}
-		w.Write([]byte(mockCompletedRun))
+		w.Write([]byte(m.completeBody()))
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		w.Write([]byte(`{"object":"list","data":[{"id":"muse-spark-1.3"},{"id":"extra-model"}]}`))
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/responses/"):
@@ -79,6 +83,26 @@ func (m *mockUpstream) last() (body []byte, stream bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastBody, m.lastStream
+}
+
+// completeBody/streamBody serve per-test canned runs, defaulting to the
+// shared _bash fixtures.
+func (m *mockUpstream) completeBody() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.completeOverride != "" {
+		return m.completeOverride
+	}
+	return mockCompletedRun
+}
+
+func (m *mockUpstream) streamBody() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.streamOverride != "" {
+		return m.streamOverride
+	}
+	return mockStreamedRun
 }
 
 // e2eServer wires the real stack (usecases + translators + Muse client)
@@ -387,5 +411,70 @@ func TestE2EModelsAndBearer(t *testing.T) {
 	}
 	if !ids["muse-code/muse-spark-1.3"] || !ids["muse-code/extra-model"] {
 		t.Fatalf("merged ids = %v", ids)
+	}
+}
+
+func TestE2ENamespaceRoundtrip(t *testing.T) {
+	server, mock := e2eServer(t, nil)
+	defer server.Close()
+	mock.completeOverride = `{"id":"resp_9","object":"response","created_at":1794373201.0,"model":"muse-spark-1.3","status":"completed",
+		"tools":[{"type":"function","name":"_mcp__nex_search__search_web"}],
+		"output":[{"type":"function_call","id":"fc_9","call_id":"call_9","name":"_mcp__nex_search__search_web","arguments":"{}","status":"completed"}],
+		"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+	mock.streamOverride = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_9\",\"call_id\":\"call_9\",\"name\":\"_mcp__nex_search__search_web\",\"arguments\":\"\"}}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"fc_9\",\"arguments\":\"{}\",\"name\":\"_mcp__nex_search__search_web\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"resp_9\",\"object\":\"response\",\"created_at\":1794373201.0,\"model\":\"muse-spark-1.3\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_9\",\"name\":\"_mcp__nex_search__search_web\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n"
+
+	request := `{"model":"muse-spark-1.3","input":"hi","tools":[
+		{"type":"namespace","name":"mcp__nex_search","tools":[
+			{"type":"function","name":"search_web","description":"Search.","parameters":{"type":"object"}}]}]}`
+	status, raw := e2ePost(t, server.URL+"/v1/responses", request)
+	if status != 200 {
+		t.Fatalf("status=%d body=%s", status, raw)
+	}
+	// Upstream must see flat functions only: no namespace wrapper survives.
+	sent := upstreamPayload(t, mock)
+	var upstreamTools []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(sent["tools"], &upstreamTools); err != nil {
+		t.Fatalf("upstream tools: %v", err)
+	}
+	if len(upstreamTools) != 1 || upstreamTools[0].Type != "function" ||
+		upstreamTools[0].Name != "_mcp__nex_search__search_web" {
+		t.Fatalf("upstream tools = %+v", upstreamTools)
+	}
+	// The client gets the namespaced identity back.
+	var decoded struct {
+		Output []struct {
+			Type      string `json:"type"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	call := decoded.Output[0]
+	if call.Type != "function_call" || call.CallID != "call_9" ||
+		call.Name != "search_web" || call.Namespace != "mcp__nex_search" {
+		t.Fatalf("client call = %+v", call)
+	}
+
+	// Streaming reconstructs identically.
+	status, raw = e2ePost(t, server.URL+"/v1/responses", `{"model":"muse-spark-1.3","stream":true,"input":"hi","tools":[
+		{"type":"namespace","name":"mcp__nex_search","tools":[
+			{"type":"function","name":"search_web","parameters":{"type":"object"}}]}]}`)
+	if status != 200 {
+		t.Fatalf("stream status=%d body=%s", status, raw)
+	}
+	text := string(raw)
+	if strings.Contains(text, "_mcp__nex_search__search_web") {
+		t.Fatalf("wire name leaked to stream client: %q", text)
+	}
+	if !strings.Contains(text, `"name":"search_web"`) || !strings.Contains(text, `"namespace":"mcp__nex_search"`) {
+		t.Fatalf("stream body = %q", text)
 	}
 }
