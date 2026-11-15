@@ -190,6 +190,9 @@ merge `/v1/models`, dan 401 tanpa bearer.
   upstream baru diketahui saat `message_delta`.
 - Hosted/upstream-only tools (web search dsb.) tidak diterjemahkan ke
   chat/messages; di `/v1/responses` diteruskan apa adanya.
+- MCP client-side (nama flat `mcp__server__tool` ala Claude Code) jalan di
+  semua endpoint; konektor MCP server-side Anthropic (`mcp_servers`,
+  `mcp_toolset`, blok `mcp_tool_use`) belum didukung dan ditolak 400.
 - `previous_response_id` diteruskan apa adanya (butuh `store: true`).
 - `GET /v1/responses/{id}` mendecode nama tool secara persis hanya untuk run
   yang dibuat oleh instance router ini (cache wiremap 1 jam, maks 10 ribu);

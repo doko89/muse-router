@@ -87,7 +87,7 @@ func TestMessagesToResponsesChoices(t *testing.T) {
 		t.Fatalf("missing max_tokens err = %v", err)
 	}
 
-	badRole := messagesRequest(t, `{"model":"m","max_tokens":8,"messages":[{"role":"system","content":"hi"}]}`)
+	badRole := messagesRequest(t, `{"model":"m","max_tokens":8,"messages":[{"role":"developer","content":"hi"}]}`)
 	if _, _, err := MessagesToResponses(badRole, false); err == nil || !strings.Contains(err.Error(), "role") {
 		t.Fatalf("bad role err = %v", err)
 	}
@@ -154,5 +154,90 @@ func TestMessagesStreamTranslator(t *testing.T) {
 	}
 	if !done {
 		t.Fatal("stream must finish")
+	}
+}
+
+func TestMessagesAssistantTextUsesOutputText(t *testing.T) {
+	// Upstream rejects `input_text` on assistant messages, so assistant
+	// text blocks must translate to `output_text` while user text stays
+	// `input_text`. Otherwise any multi-turn conversation with assistant
+	// text fails upstream.
+	req := messagesRequest(t, `{
+		"model": "m", "max_tokens": 64,
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"hi"}]},
+			{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"tool_use","id":"t1","name":"bash","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}
+		],
+		"tools": [{"name":"bash"}]
+	}`)
+	out, _, err := MessagesToResponses(req, false)
+	if err != nil {
+		t.Fatalf("MessagesToResponses: %v", err)
+	}
+	_, items, err := out.ParseInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRole := map[string][]domain.ResponsesContentBlock{}
+	for _, item := range items {
+		if item.Role == "" {
+			continue
+		}
+		byRole[item.Role] = append(byRole[item.Role], item.ContentBlocks()...)
+	}
+	if blocks := byRole["user"]; len(blocks) != 1 || blocks[0].Type != "input_text" {
+		t.Fatalf("user blocks = %+v", blocks)
+	}
+	if blocks := byRole["assistant"]; len(blocks) != 1 || blocks[0].Type != "output_text" || blocks[0].Text != "hello" {
+		t.Fatalf("assistant blocks = %+v", blocks)
+	}
+}
+
+func TestMessagesSystemRoleMessageAccepted(t *testing.T) {
+	// Claude Code sends system prompts as system-role messages with
+	// unrecognized models; they must ride along as user-side input
+	// instead of failing the request.
+	req := messagesRequest(t, `{
+		"model": "m", "max_tokens": 64,
+		"messages": [
+			{"role":"system","content":[{"type":"text","text":"Be helpful."}]},
+			{"role":"user","content":"hi"}
+		]
+	}`)
+	out, _, err := MessagesToResponses(req, false)
+	if err != nil {
+		t.Fatalf("MessagesToResponses: %v", err)
+	}
+	_, items, err := out.ParseInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Role != "user" {
+		t.Fatalf("items = %+v", items)
+	}
+	blocks := items[0].ContentBlocks()
+	if len(blocks) != 1 || blocks[0].Type != "input_text" || blocks[0].Text != "Be helpful." {
+		t.Fatalf("system blocks = %+v", blocks)
+	}
+	// String-content system messages ride along too.
+	req = messagesRequest(t, `{
+		"model": "m", "max_tokens": 64,
+		"messages": [{"role":"system","content":"Be brief."},{"role":"user","content":"hi"}]
+	}`)
+	out, _, err = MessagesToResponses(req, false)
+	if err != nil {
+		t.Fatalf("string system: %v", err)
+	}
+	if _, items, err := out.ParseInput(); err != nil || items[0].Role != "user" || items[0].ContentText() != "Be brief." {
+		t.Fatalf("string system items = %+v, %v", items, err)
+	}
+	// Other roles are still rejected.
+	req = messagesRequest(t, `{
+		"model": "m", "max_tokens": 64,
+		"messages": [{"role":"developer","content":"hi"}]
+	}`)
+	if _, _, err := MessagesToResponses(req, false); err == nil {
+		t.Fatal("developer role must be rejected")
 	}
 }

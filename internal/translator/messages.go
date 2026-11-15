@@ -100,17 +100,29 @@ func MessagesToResponses(req *domain.MessagesRequest, storeDefault bool) (*domai
 
 // anthropicMessageItems converts one turn into Responses items.
 func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.ResponsesInputItem, error) {
-	if message.Role != "user" && message.Role != "assistant" {
+	// Claude Code sends system prompts as system-role messages; carry
+	// them as user-side input so the content still reaches the model.
+	role := message.Role
+	if role == "system" {
+		role = "user"
+	}
+	if role != "user" && role != "assistant" {
 		return nil, domain.BadRequest("messages: unsupported role %q", message.Role)
 	}
 	if !message.IsBlocks() {
 		return []domain.ResponsesInputItem{{
-			Role:    message.Role,
+			Role:    role,
 			Content: mustJSONString(message.Text()),
 		}}, nil
 	}
 	var items []domain.ResponsesInputItem
 	var textBlocks []domain.ResponsesContentBlock
+	// Upstream only accepts `input_text` on user-side messages; assistant
+	// text must use `output_text`.
+	textType := "input_text"
+	if message.Role == "assistant" {
+		textType = "output_text"
+	}
 	flushText := func() {
 		if len(textBlocks) == 0 {
 			return
@@ -119,13 +131,13 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 		if err != nil {
 			raw = mustJSONString("")
 		}
-		items = append(items, domain.ResponsesInputItem{Role: message.Role, Content: raw})
+		items = append(items, domain.ResponsesInputItem{Role: role, Content: raw})
 		textBlocks = nil
 	}
 	for _, block := range message.Blocks() {
 		switch block.Type {
 		case "text":
-			textBlocks = append(textBlocks, domain.ResponsesContentBlock{Type: "input_text", Text: block.Text})
+			textBlocks = append(textBlocks, domain.ResponsesContentBlock{Type: textType, Text: block.Text})
 		case "image":
 			image, err := anthropicImageBlock(block)
 			if err != nil {
@@ -133,7 +145,7 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 			}
 			textBlocks = append(textBlocks, image)
 		case "tool_use":
-			if message.Role != "assistant" {
+			if role != "assistant" {
 				return nil, domain.BadRequest("messages: tool_use blocks require the assistant role")
 			}
 			if block.ID == "" {
@@ -159,7 +171,7 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 				Arguments: args,
 			})
 		case "tool_result":
-			if message.Role != "user" {
+			if role != "user" {
 				return nil, domain.BadRequest("messages: tool_result blocks require the user role")
 			}
 			if block.ToolUseID == "" {
