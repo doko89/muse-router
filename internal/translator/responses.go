@@ -3,7 +3,6 @@ package translator
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"strconv"
 	"strings"
 
@@ -69,7 +68,6 @@ func SanitizeRaw(raw []byte, storeDefault bool, ladder []string, stream bool) (p
 	if err != nil {
 		return nil, nil, err
 	}
-	log.Printf("router tools in: %v", names)
 	if err := sanitizeRawReasoning(req, ladder); err != nil {
 		return nil, nil, err
 	}

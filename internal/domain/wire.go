@@ -608,17 +608,38 @@ func (r *MessagesRequest) ThinkingType() string {
 
 // ToolChoiceNone reports whether tool_choice selects type "none".
 func (r *MessagesRequest) ToolChoiceNone() bool {
+	return r.ToolChoiceType() == "none"
+}
+
+// ToolChoiceType returns tool_choice.type ("auto", "any", "tool", "none") or
+// "" when tool_choice is absent, null, or not an object.
+func (r *MessagesRequest) ToolChoiceType() string {
 	trimmed := bytes.TrimSpace(r.ToolChoice)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return false
+		return ""
 	}
 	var value struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return ""
+	}
+	return value.Type
+}
+
+// ToolChoiceDisableParallel reports tool_choice.disable_parallel_tool_use.
+func (r *MessagesRequest) ToolChoiceDisableParallel() bool {
+	trimmed := bytes.TrimSpace(r.ToolChoice)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return false
 	}
-	return value.Type == "none"
+	var value struct {
+		DisableParallelToolUse bool `json:"disable_parallel_tool_use"`
+	}
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return false
+	}
+	return value.DisableParallelToolUse
 }
 
 // MessagesOutBlock is one assistant output block.

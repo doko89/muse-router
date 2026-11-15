@@ -307,8 +307,13 @@ func writeOpenAIError(w http.ResponseWriter, err error) {
 func writeAnthropicError(w http.ResponseWriter, err error) {
 	route := domain.AsRouterError(err)
 	anthropicType := route.Type
-	if anthropicType == "server_error" {
-		anthropicType = "api_error"
+	switch {
+	case route.Status == http.StatusNotFound:
+		anthropicType = "not_found_error"
+	case route.Status >= 500:
+		anthropicType = "overloaded_error"
+	case anthropicType == "server_error" || anthropicType == "upstream_error":
+		anthropicType = "invalid_request_error"
 	}
 	writeJSON(w, route.Status, anthropicErrorPayload{
 		Type:  "error",

@@ -92,7 +92,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Anthropic-Version, Anthropic-Beta, OpenAI-Beta")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Anthropic-Version, Anthropic-Beta, OpenAI-Beta, x-api-key")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -122,7 +122,8 @@ func (s *Server) logging(next http.Handler) http.Handler {
 }
 
 // authorize enforces bearer auth on /v1/*. Health and preflight stay open.
-// Tokens in query params or non-bearer headers are rejected outright.
+// Tokens in query params or non-bearer headers are rejected outright, except
+// x-api-key on /v1/messages: stock Anthropic SDKs send the key there.
 func (s *Server) authorize(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.Method == http.MethodOptions {
@@ -134,6 +135,9 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 			return
 		}
 		token, _ := auth.BearerFromHeader(r.Header.Get("Authorization"))
+		if token == "" && r.URL.Path == "/v1/messages" {
+			token = strings.TrimSpace(r.Header.Get("x-api-key"))
+		}
 		if !s.auth.Valid(token) {
 			writeRouteError(w, r, domain.Unauthorized("unauthorized"))
 			return
@@ -156,6 +160,9 @@ func (s *Server) misplacedBearer(r *http.Request) bool {
 	}
 	for name, values := range r.Header {
 		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie") {
+			continue
+		}
+		if strings.EqualFold(name, "x-api-key") && r.URL.Path == "/v1/messages" {
 			continue
 		}
 		for _, value := range values {

@@ -12,7 +12,9 @@ kembali sebagai endpoint yang kompatibel dengan OpenAI dan Anthropic.
 
 Auth ganda: **bearer token router** untuk klien (`ROUTER_API_KEYS`), dan
 **kredensial Muse** (`oauthAccessToken` + subscription `apiKey`) untuk upstream
-`https://api.meta.ai/v1`. Referensi auth Muse: `packages/ai/src/registry/oauth/muse-code.ts`
+`https://api.meta.ai/v1`. `/v1/messages` juga menerima token router via header
+`x-api-key` agar SDK Anthropic standar bisa dipakai langsung (cukup `baseURL` +
+`apiKey`). Referensi auth Muse: `packages/ai/src/registry/oauth/muse-code.ts`
 dan `packages/catalog/src/compat/rules/{auth,providers}/muse-code.kdl` di repo ini.
 
 Tech stack: **Go 1.24, stdlib `net/http` saja** (tanpa framework), clean architecture.
@@ -116,7 +118,8 @@ ID model boleh telanjang (`muse-spark-1.3`) atau terkualifikasi
 - **`tool_choice`**: `auto` (atau absen) dibuang karena upstream hanya
   menerima `auto`; `none` dipenuhi dengan tidak mengirim tools sama sekali
   (berlaku di chat, responses, dan Anthropic `{"type": "none"}`);
-  `required`/spesifik-fungsi ditolak 400 karena upstream tidak mendukungnya.
+  `required`/spesifik-fungsi (chat/responses), serta Anthropic `any`/`tool` dan
+  `disable_parallel_tool_use`, ditolak 400 karena upstream tidak mendukungnya.
 - **`store`** default dari `MUSE_STORE_RESPONSES` (default off, demi privasi);
   klien boleh override per request di chat/responses.
 - **Reasoning effort** `minimal/low/medium/high/xhigh/max` divalidasi lalu
@@ -167,7 +170,13 @@ merge `/v1/models`, dan 401 tanpa bearer.
 
 - Hanya model teks+image Muse; endpoint image/audio/embeddings tidak ada.
 - Opsi tanpa padanan Responses di-drop diam-diam: `stop`, presence/frequency
-  penalty, `top_k`, Anthropic `service_tier`/`metadata`, budget `thinking`.
+  penalty, `top_k`, Anthropic `service_tier`/`metadata`/`stop_sequences`
+  (`stop_reason: stop_sequence` tak pernah terjangkau), `cache_control`
+  (prompt caching), budget `thinking`.
+- Blok konten Anthropic yang tak didukung (`document`, `search_result`, ...)
+  dan sumber image tak valid ditolak 400 (kecuali blok `thinking` yang
+  di-drop); `message_start` di stream membawa `usage` nol karena usage
+  upstream baru diketahui saat `message_delta`.
 - Hosted/upstream-only tools (web search dsb.) tidak diterjemahkan ke
   chat/messages; di `/v1/responses` diteruskan apa adanya.
 - `previous_response_id` diteruskan apa adanya (butuh `store: true`).

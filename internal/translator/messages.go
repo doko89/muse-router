@@ -3,15 +3,17 @@ package translator
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"muse-router/internal/domain"
 )
 
 // MessagesToResponses converts an Anthropic request into an upstream request.
-// tool_choice is dropped (Muse accepts only auto), except type "none" which
-// omits the tools entirely. thinking.disabled maps to the minimal effort;
-// an enabled budget has no Responses equivalent and is ignored.
+// tool_choice auto (or absent) is dropped since Muse accepts only auto; none
+// omits the tools entirely; any/tool (or disable_parallel_tool_use) is a 400
+// since upstream cannot honor it. thinking.disabled maps to the minimal
+// effort; an enabled budget has no Responses equivalent and is ignored.
 func MessagesToResponses(req *domain.MessagesRequest, storeDefault bool) (*domain.ResponsesRequest, map[string]string, error) {
 	if req.Model == "" {
 		return nil, nil, domain.BadRequest("Missing top-level `model` field")
@@ -22,10 +24,21 @@ func MessagesToResponses(req *domain.MessagesRequest, storeDefault bool) (*domai
 	if req.MaxTokens == nil || *req.MaxTokens < 1 {
 		return nil, nil, domain.BadRequest("messages: `max_tokens` is required and must be >= 1")
 	}
+	choice := req.ToolChoiceType()
+	switch choice {
+	case "", "auto", "none":
+	case "any", "tool":
+		return nil, nil, domain.BadRequest("messages: tool_choice %q is not supported by upstream (only \"auto\" and \"none\")", choice)
+	default:
+		return nil, nil, domain.BadRequest("messages: invalid tool_choice type %q (use \"auto\" or \"none\")", choice)
+	}
+	if req.ToolChoiceDisableParallel() {
+		return nil, nil, domain.BadRequest("messages: tool_choice disable_parallel_tool_use is not supported by upstream")
+	}
 
 	wireMap := map[string]string{}
 	var tools []domain.ResponsesTool
-	if !req.ToolChoiceNone() {
+	if choice != "none" {
 		names := make([]string, 0, len(req.Tools))
 		for _, tool := range req.Tools {
 			if tool.Name == "" {
@@ -114,7 +127,11 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 		case "text":
 			textBlocks = append(textBlocks, domain.ResponsesContentBlock{Type: "input_text", Text: block.Text})
 		case "image":
-			textBlocks = append(textBlocks, anthropicImageBlock(block))
+			image, err := anthropicImageBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			textBlocks = append(textBlocks, image)
 		case "tool_use":
 			if message.Role != "assistant" {
 				return nil, domain.BadRequest("messages: tool_use blocks require the assistant role")
@@ -148,20 +165,21 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 			if block.ToolUseID == "" {
 				return nil, domain.BadRequest("messages: tool_result block is missing tool_use_id")
 			}
+			output, err := toolResultOutput(block)
+			if err != nil {
+				return nil, err
+			}
 			flushText()
 			items = append(items, domain.ResponsesInputItem{
 				Type:   "function_call_output",
 				CallID: block.ToolUseID,
-				Output: toolResultOutput(block),
+				Output: output,
 			})
 		case "thinking", "redacted_thinking":
 			// Reasoning replay is Anthropic-native; translated turns drop it.
 			continue
 		default:
-			textBlocks = append(textBlocks, domain.ResponsesContentBlock{
-				Type: "input_text",
-				Text: "[" + block.Type + "]",
-			})
+			return nil, domain.BadRequest("messages: unsupported content block type %q", block.Type)
 		}
 	}
 	flushText()
@@ -169,15 +187,15 @@ func anthropicMessageItems(message *domain.AnthropicMessage) ([]domain.Responses
 }
 
 // anthropicImageBlock converts one image block to Responses content.
-func anthropicImageBlock(block domain.AnthropicBlock) domain.ResponsesContentBlock {
+func anthropicImageBlock(block domain.AnthropicBlock) (domain.ResponsesContentBlock, error) {
 	source := block.Source
 	if source == nil {
-		return domain.ResponsesContentBlock{Type: "input_text", Text: "[image: missing source]"}
+		return domain.ResponsesContentBlock{}, domain.BadRequest("messages: image block is missing source")
 	}
 	switch source.Type {
 	case "base64":
 		if source.Data == "" {
-			return domain.ResponsesContentBlock{Type: "input_text", Text: "[image: empty base64 source]"}
+			return domain.ResponsesContentBlock{}, domain.BadRequest("messages: image block has empty base64 data")
 		}
 		mediaType := source.MediaType
 		if mediaType == "" {
@@ -186,34 +204,39 @@ func anthropicImageBlock(block domain.AnthropicBlock) domain.ResponsesContentBlo
 		return domain.ResponsesContentBlock{
 			Type:     "input_image",
 			ImageURL: "data:" + mediaType + ";base64," + source.Data,
-		}
+		}, nil
 	case "url":
 		if source.URL == "" {
-			return domain.ResponsesContentBlock{Type: "input_text", Text: "[image: empty url source]"}
+			return domain.ResponsesContentBlock{}, domain.BadRequest("messages: image block has empty url")
 		}
-		return domain.ResponsesContentBlock{Type: "input_image", ImageURL: source.URL}
+		return domain.ResponsesContentBlock{Type: "input_image", ImageURL: source.URL}, nil
+	case "file":
+		if source.FileID == "" {
+			return domain.ResponsesContentBlock{}, domain.BadRequest("messages: image block has empty file_id")
+		}
+		return domain.ResponsesContentBlock{Type: "input_image", FileID: source.FileID}, nil
 	default:
-		return domain.ResponsesContentBlock{Type: "input_text", Text: "[image: unsupported source " + source.Type + "]"}
+		return domain.ResponsesContentBlock{}, domain.BadRequest("messages: unsupported image source type %q", source.Type)
 	}
 }
 
 // toolResultOutput converts tool_result content to Responses output.
-func toolResultOutput(block domain.AnthropicBlock) json.RawMessage {
+func toolResultOutput(block domain.AnthropicBlock) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(block.Content)
 	prefix := ""
 	if block.IsError != nil && *block.IsError {
 		prefix = "Error: "
 	}
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return mustJSONString(prefix)
+		return mustJSONString(prefix), nil
 	}
 	var text string
 	if err := json.Unmarshal(trimmed, &text); err == nil {
-		return mustJSONString(prefix + text)
+		return mustJSONString(prefix + text), nil
 	}
 	var blocks []domain.AnthropicBlock
 	if err := json.Unmarshal(trimmed, &blocks); err != nil {
-		return mustJSONString(prefix + string(trimmed))
+		return mustJSONString(prefix + string(trimmed)), nil
 	}
 	var out []domain.ResponsesContentBlock
 	var textOnly strings.Builder
@@ -225,20 +248,26 @@ func toolResultOutput(block domain.AnthropicBlock) json.RawMessage {
 			textOnly.WriteString(part.Text)
 		case "image":
 			hasImage = true
-			out = append(out, anthropicImageBlock(part))
+			image, err := anthropicImageBlock(part)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, image)
+		default:
+			return nil, domain.BadRequest("messages: unsupported tool_result content type %q", part.Type)
 		}
 	}
 	if !hasImage {
-		return mustJSONString(prefix + textOnly.String())
+		return mustJSONString(prefix + textOnly.String()), nil
 	}
 	if prefix != "" {
 		out = append([]domain.ResponsesContentBlock{{Type: "input_text", Text: prefix}}, out...)
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
-		return mustJSONString(prefix + textOnly.String())
+		return mustJSONString(prefix + textOnly.String()), nil
 	}
-	return raw
+	return raw, nil
 }
 
 // ResponsesToMessages converts a completed upstream run into a Messages reply.
@@ -321,12 +350,18 @@ type messagesOpenBlock struct {
 }
 
 // MessagesStreamTranslator converts upstream events into Anthropic SSE.
+//
+// Content-block indices are dense (0..n): a text block claims its index when
+// content_block_start is emitted, not when the upstream item opens, so an
+// empty message burns no index. Args deltas that arrive before their item
+// are buffered in pending and flushed at content_block_start.
 type MessagesStreamTranslator struct {
 	model   string
 	wireMap map[string]string
 	id      string
 	next    int
 	open    map[int]*messagesOpenBlock
+	pending map[int]string
 	hasTool bool
 	started bool
 }
@@ -338,6 +373,7 @@ func NewMessagesStreamTranslator(model string, wireMap map[string]string) *Messa
 		wireMap: wireMap,
 		id:      domain.NewMessageID(),
 		open:    make(map[int]*messagesOpenBlock),
+		pending: make(map[int]string),
 	}
 }
 
@@ -405,6 +441,9 @@ func (t *MessagesStreamTranslator) onItemAdded(event domain.ResponsesStreamEvent
 		if callID == "" {
 			callID = event.ItemID
 		}
+		if callID == "" {
+			callID = domain.NewCallID()
+		}
 		block := &messagesOpenBlock{index: t.next, kind: "tool_use", id: callID, name: DecodeToolName(item.Name, t.wireMap), started: true}
 		t.next++
 		t.open[index] = block
@@ -418,12 +457,16 @@ func (t *MessagesStreamTranslator) onItemAdded(event domain.ResponsesStreamEvent
 			Index: block.index,
 			Block: toolBlock,
 		}))
+		if buffered, ok := t.pending[index]; ok {
+			delete(t.pending, index)
+			t.emitArgsDelta(events, block.index, buffered)
+		}
 	case "message":
-		block := &messagesOpenBlock{index: t.next, kind: "text"}
-		t.next++
-		t.open[index] = block
+		t.open[index] = &messagesOpenBlock{index: -1, kind: "text"}
+		delete(t.pending, index)
 	default:
 		t.open[index] = &messagesOpenBlock{index: -1, kind: "other"}
+		delete(t.pending, index)
 	}
 }
 
@@ -431,12 +474,15 @@ func (t *MessagesStreamTranslator) onTextDelta(event domain.ResponsesStreamEvent
 	index := event.OutputIndexValue()
 	block, ok := t.open[index]
 	if !ok {
-		block = &messagesOpenBlock{index: t.next, kind: "text"}
-		t.next++
+		block = &messagesOpenBlock{index: -1, kind: "text"}
 		t.open[index] = block
 	}
-	if block.kind != "text" || block.index < 0 {
+	if block.kind != "text" {
 		return
+	}
+	if block.index < 0 {
+		block.index = t.next
+		t.next++
 	}
 	if !block.started {
 		block.started = true
@@ -462,27 +508,38 @@ func (t *MessagesStreamTranslator) onTextDelta(event domain.ResponsesStreamEvent
 }
 
 func (t *MessagesStreamTranslator) onArgsDelta(event domain.ResponsesStreamEvent, events *[]domain.MessagesStreamEvent) {
-	block, ok := t.open[event.OutputIndexValue()]
-	if !ok || block.kind != "tool_use" || !block.started {
+	index := event.OutputIndexValue()
+	block, ok := t.open[index]
+	if !ok {
+		t.pending[index] += event.Delta
 		return
 	}
-	argsDelta, err := json.Marshal(msgJSONDelta{Type: "input_json_delta", PartialJSON: event.Delta})
+	if block.kind != "tool_use" || !block.started {
+		return
+	}
+	t.emitArgsDelta(events, block.index, event.Delta)
+}
+
+func (t *MessagesStreamTranslator) emitArgsDelta(events *[]domain.MessagesStreamEvent, index int, delta string) {
+	argsDelta, err := json.Marshal(msgJSONDelta{Type: "input_json_delta", PartialJSON: delta})
 	if err != nil {
 		return
 	}
 	*events = append(*events, mustFrame("content_block_delta", msgDelta{
 		Type:  "content_block_delta",
-		Index: block.index,
+		Index: index,
 		Delta: argsDelta,
 	}))
 }
 
 func (t *MessagesStreamTranslator) onItemDone(event domain.ResponsesStreamEvent, events *[]domain.MessagesStreamEvent) {
-	block, ok := t.open[event.OutputIndexValue()]
+	index := event.OutputIndexValue()
+	block, ok := t.open[index]
 	if !ok {
 		return
 	}
-	delete(t.open, event.OutputIndexValue())
+	delete(t.open, index)
+	delete(t.pending, index)
 	if !block.started || block.index < 0 {
 		return
 	}
@@ -493,13 +550,18 @@ func (t *MessagesStreamTranslator) onItemDone(event domain.ResponsesStreamEvent,
 }
 
 func (t *MessagesStreamTranslator) finish(events *[]domain.MessagesStreamEvent, event domain.ResponsesStreamEvent, truncated bool) {
+	var rest []*messagesOpenBlock
 	for _, block := range t.open {
 		if block.started && block.index >= 0 {
-			*events = append(*events, mustFrame("content_block_stop", msgBlockStop{
-				Type:  "content_block_stop",
-				Index: block.index,
-			}))
+			rest = append(rest, block)
 		}
+	}
+	sort.Slice(rest, func(i, j int) bool { return rest[i].index < rest[j].index })
+	for _, block := range rest {
+		*events = append(*events, mustFrame("content_block_stop", msgBlockStop{
+			Type:  "content_block_stop",
+			Index: block.index,
+		}))
 	}
 	t.open = make(map[int]*messagesOpenBlock)
 	stopReason := "end_turn"
@@ -575,7 +637,8 @@ type msgMessageDelta struct {
 }
 
 type msgStopReason struct {
-	StopReason string `json:"stop_reason"`
+	StopReason   string  `json:"stop_reason"`
+	StopSequence *string `json:"stop_sequence"`
 }
 
 type msgUsageDelta struct {
